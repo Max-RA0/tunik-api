@@ -6,9 +6,12 @@ import Vehiculo from "./vehiculo.js";
 import MetodoPago from "./metodospago.js";
 import Servicio from "./servicios.js"; // ✅ necesario para el detalle
 
+// ✅ CAMBIA ESTA RUTA SI TU ARCHIVO SE LLAMA DIFERENTE
+import AgendaCita from "./agendacitas.js";
+
 /* ============================
    Modelo: Cotizacion (MASTER)
-   ============================ */
+============================ */
 const Cotizacion = sequelize.define(
   "Cotizacion",
   {
@@ -39,6 +42,13 @@ const Cotizacion = sequelize.define(
       allowNull: false,
       field: "fecha",
     },
+
+    // ✅ NUEVO: link con agenda
+    idagendacitas: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      field: "idagendacitas",
+    },
   },
   {
     tableName: "cotizaciones",
@@ -46,6 +56,9 @@ const Cotizacion = sequelize.define(
   }
 );
 
+/* ============================
+   Modelo: DetalleCotizacion
+============================ */
 const DetalleCotizacion = sequelize.define(
   "DetalleCotizacion",
   {
@@ -73,20 +86,29 @@ const DetalleCotizacion = sequelize.define(
   }
 );
 
+/* ============================
+   RELACIONES
+============================ */
 Cotizacion.belongsTo(Vehiculo, {
   foreignKey: "placa",
   targetKey: "placa",
   as: "vehiculo",
 });
 
-// Cotizacion -> MetodoPago
 Cotizacion.belongsTo(MetodoPago, {
   foreignKey: "idmpago",
   targetKey: "idmpago",
   as: "metodoPago",
 });
 
-// Cotizacion -> Detalles
+// ✅ Cotización -> Agenda
+Cotizacion.belongsTo(AgendaCita, {
+  foreignKey: "idagendacitas",
+  targetKey: "idagendacitas",
+  as: "agenda",
+});
+
+// Cotización -> Detalles
 Cotizacion.hasMany(DetalleCotizacion, {
   foreignKey: "idcotizaciones",
   sourceKey: "idcotizaciones",
@@ -94,22 +116,21 @@ Cotizacion.hasMany(DetalleCotizacion, {
   onDelete: "CASCADE",
 });
 
-// Detalle -> Cotizacion
+// Detalle -> Cotización
 DetalleCotizacion.belongsTo(Cotizacion, {
   foreignKey: "idcotizaciones",
   targetKey: "idcotizaciones",
   as: "cotizacion",
-
 });
 
-//  Detalle -> Servicio (esto te permite d.servicio.nombreservicios)
+// Detalle -> Servicio
 DetalleCotizacion.belongsTo(Servicio, {
   foreignKey: "idservicios",
   targetKey: "idservicios",
   as: "servicio",
 });
 
-// (Opcional, útil) Servicio -> Detalles
+// Servicio -> Detalles
 Servicio.hasMany(DetalleCotizacion, {
   foreignKey: "idservicios",
   sourceKey: "idservicios",

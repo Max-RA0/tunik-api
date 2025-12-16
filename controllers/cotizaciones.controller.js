@@ -8,8 +8,8 @@ import MetodoPago from "../models/metodospago.js";
 import Servicio from "../models/servicios.js";
 
 /* =========================
-   Helpers (igual idea a pedidos)
-   ========================= */
+   Helpers
+========================= */
 const safeArray = (x) => (Array.isArray(x) ? x : []);
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
@@ -24,7 +24,7 @@ const getPageLimit = (req) => {
   let limit = parseInt(req.query?.limit ?? String(MAX_LIMIT), 10);
   if (!Number.isFinite(limit) || limit < 1) limit = MAX_LIMIT;
 
-  limit = Math.min(limit, MAX_LIMIT); // ✅ cap a 7
+  limit = Math.min(limit, MAX_LIMIT);
   const offset = (page - 1) * limit;
 
   return { page, limit, offset };
@@ -74,7 +74,12 @@ const normalizeItems = (items) => {
     if (!idservicios) return;
 
     const preciochange = asMoney(
-      it?.preciochange ?? it?.precio ?? it?.precioFinal ?? it?.precioChange
+      it?.preciochange ??
+        it?.precio ??
+        it?.precioFinal ??
+        it?.precioChange ??
+        it?.precio_unitario ??
+        it?.precioUnitario
     );
 
     map.set(String(idservicios), { idservicios, preciochange });
@@ -90,24 +95,131 @@ async function assertServicioExiste(idservicios, t) {
 }
 
 /* =========================================================
-   COTIZACIONES (MASTER) - ahora soporta MASTER+DETAIL como pedidos
-   ========================================================= */
+   ✅ Agenda -> traer placa y sus servicios (detalle)
+   - Usamos RAW SQL para que no dependas de modelos extra.
+   - IMPORTANTE: si tu tabla detalle tiene otro nombre,
+     edita la lista de queries abajo.
+========================================================= */
+async function getAgendaHeader(idagendacitas, t) {
+  const id = asInt(idagendacitas);
+  if (!id) return null;
+
+  const rows = await sequelize.query(
+    `SELECT idagendacitas, placa
+     FROM agendacitas
+     WHERE idagendacitas = :id
+     LIMIT 1`,
+    { replacements: { id }, type: QueryTypes.SELECT, transaction: t }
+  );
+
+  return rows?.[0] ?? null;
+}
+
+async function getAgendaDetalleRows(idagendacitas, t) {
+  const id = asInt(idagendacitas);
+  if (!id) return [];
+
+  // 👇 Intenta varios nombres por si tu tabla detalle se llama diferente
+  const candidates = [
+    // el más común que usamos en este proyecto:
+    {
+      sql: `SELECT idservicios, precio_unitario
+            FROM detalleagendacitas
+            WHERE idagendacitas = :id`,
+    },
+    // alternativas posibles:
+    {
+      sql: `SELECT idservicios, precio_unitario
+            FROM detalle_agendacitas
+            WHERE idagendacitas = :id`,
+    },
+    {
+      sql: `SELECT idservicios, precio_unitario
+            FROM detalleagenda
+            WHERE idagendacitas = :id`,
+    },
+    {
+      sql: `SELECT idservicios, precio_unitario
+            FROM detalleagendas
+            WHERE idagendacitas = :id`,
+    },
+  ];
+
+  for (const c of candidates) {
+    try {
+      const rows = await sequelize.query(c.sql, {
+        replacements: { id },
+        type: QueryTypes.SELECT,
+        transaction: t,
+      });
+
+      if (Array.isArray(rows)) return rows;
+    } catch {
+      // intenta el siguiente candidato
+    }
+  }
+
+  // si ninguna pegó, devolvemos vacío (y el controller lo validará)
+  return [];
+}
+
+async function getItemsFromAgenda(idagendacitas, t) {
+  const rows = await getAgendaDetalleRows(idagendacitas, t);
+  // convertimos al formato de cotización: {idservicios, preciochange}
+  return normalizeItems(
+    safeArray(rows).map((r) => ({
+      idservicios: r?.idservicios,
+      // si la agenda guarda precio_unitario, lo usamos como preciochange
+      preciochange: r?.precio_unitario ?? r?.preciochange ?? null,
+    }))
+  );
+}
+
+/* =========================================================
+   COTIZACIONES (MASTER) - ahora con AGENDA
+========================================================= */
 
 // POST /api/cotizaciones
-// Soporta master-detail si envías body.items = [{idservicios, preciochange?}, ...]
+// ✅ Soporta:
+// - body.idagendacitas -> trae servicios de esa agenda y los mete al detalle
+// - body.items -> extras (se mezclan)
 export const createCotizacion = async (req, res) => {
   const t = await sequelize.transaction();
   try {
-    const placa = String(req.body.placa ?? "").trim();
+    const idagendacitas = asInt(req.body.idagendacitas ?? req.body.idAgendaCitas ?? req.body.idagenda);
+
+    // ✅ si viene agenda, buscamos su placa (y luego validamos/llenamos)
+    const agenda = idagendacitas ? await getAgendaHeader(idagendacitas, t) : null;
+    if (idagendacitas && !agenda) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, msg: "La agenda seleccionada no existe" });
+    }
+
+    let placa = String(req.body.placa ?? "").trim();
     const idmpago = asInt(req.body.idmpago ?? req.body.idMetodoPago);
     const estadoIn = req.body.estado ?? "Pendiente";
     const estado = normalizeEstado(estadoIn);
     const fecha = req.body.fecha; // opcional
 
-    // items: para master-detail estilo pedidos
+    // items (extras)
     const itemsSent =
       hasOwn(req.body, "items") || hasOwn(req.body, "detalles") || hasOwn(req.body, "servicios");
-    const items = normalizeItems(req.body.items ?? req.body.detalles ?? req.body.servicios);
+    const bodyItems = normalizeItems(req.body.items ?? req.body.detalles ?? req.body.servicios);
+
+    // ✅ items desde agenda (si aplica)
+    const agendaItems = idagendacitas ? await getItemsFromAgenda(idagendacitas, t) : [];
+
+    // ✅ regla: si viene agenda y NO mandan placa, la tomamos de la agenda
+    if (!placa && agenda?.placa) placa = String(agenda.placa).trim();
+
+    // ✅ si mandan placa + agenda, deben coincidir
+    if (placa && agenda?.placa && String(agenda.placa).trim() !== placa) {
+      await t.rollback();
+      return res.status(400).json({
+        ok: false,
+        msg: "La placa de la cotización no coincide con la placa de la agenda",
+      });
+    }
 
     if (!placa || !idmpago) {
       await t.rollback();
@@ -122,9 +234,18 @@ export const createCotizacion = async (req, res) => {
       });
     }
 
-    if (itemsSent && items.length === 0) {
+    // ✅ detalle final = agendaItems + bodyItems (extras)
+    // orden: agenda primero, extras al final (extras ganan si repiten servicio)
+    const mergedItems = normalizeItems([...agendaItems, ...bodyItems]);
+
+    // ✅ si hay agenda o mandaron items, el detalle NO puede quedar vacío
+    const detailMustExist = Boolean(idagendacitas) || itemsSent;
+    if (detailMustExist && mergedItems.length === 0) {
       await t.rollback();
-      return res.status(400).json({ ok: false, msg: "Agrega al menos 1 servicio a la cotización" });
+      return res.status(400).json({
+        ok: false,
+        msg: "La agenda no tiene servicios y tampoco agregaste servicios manuales",
+      });
     }
 
     const vehiculo = await Vehiculo.findByPk(placa, { transaction: t });
@@ -144,16 +265,16 @@ export const createCotizacion = async (req, res) => {
         placa,
         idmpago,
         estado,
-        // si no envían fecha, guardo hoy
         fecha: fecha ?? new Date(),
+        idagendacitas: idagendacitas ?? null,
       },
       { transaction: t }
     );
 
-    // MASTER + DETAIL (igual que pedidos)
-    if (items.length > 0) {
+    // MASTER + DETAIL
+    if (mergedItems.length > 0) {
       const detalleRows = [];
-      for (const it of items) {
+      for (const it of mergedItems) {
         const v = await assertServicioExiste(it.idservicios, t);
         if (!v.ok) {
           await t.rollback();
@@ -185,7 +306,6 @@ export const createCotizacion = async (req, res) => {
 };
 
 // GET /api/cotizaciones?placa=XXX&numero_documento=YYY
-// ✅ Ahora soporta paginación opcional: ?page=1&limit=7
 export const getCotizaciones = async (req, res) => {
   try {
     const { placa, numero_documento } = req.query;
@@ -202,13 +322,13 @@ export const getCotizaciones = async (req, res) => {
     const where = {};
     if (placa) where.placa = String(placa).trim();
 
-    // ✅ NO rompe: si no piden paginación, se comporta como antes
     if (!wantsPagination(req)) {
       const cotizaciones = await Cotizacion.findAll({
         where,
         include: [
           includeVehiculo,
           { model: MetodoPago, as: "metodoPago", attributes: ["idmpago", "nombremetodo"] },
+          // { model: AgendaCita, as: "agenda" } // (opcional si te sirve)
         ],
         order: [["idcotizaciones", "DESC"]],
       });
@@ -236,7 +356,6 @@ export const getCotizaciones = async (req, res) => {
       return res.json({ ok: true, data: respuesta });
     }
 
-    // ✅ PAGINADO (máx 7)
     const { page, limit, offset } = getPageLimit(req);
 
     const { rows, count } = await Cotizacion.findAndCountAll({
@@ -248,7 +367,7 @@ export const getCotizaciones = async (req, res) => {
       order: [["idcotizaciones", "DESC"]],
       limit,
       offset,
-      distinct: true, // ✅ importantísimo por los include
+      distinct: true,
     });
 
     if (!rows.length) {
@@ -259,7 +378,6 @@ export const getCotizaciones = async (req, res) => {
       });
     }
 
-    // total por cotización (SUM detalle) SOLO para los ids de la página actual
     const ids = rows.map((c) => c.idcotizaciones);
 
     const filasTotales = await DetalleCotizacion.findAll({
@@ -289,7 +407,7 @@ export const getCotizaciones = async (req, res) => {
   }
 };
 
-// GET /api/cotizaciones/:idcotizaciones  (incluye detalles para master-detail)
+// GET /api/cotizaciones/:idcotizaciones
 export const getCotizacionById = async (req, res) => {
   try {
     const id = asInt(req.params.idcotizaciones ?? req.params.id);
@@ -320,7 +438,8 @@ export const getCotizacionById = async (req, res) => {
 };
 
 // PUT /api/cotizaciones/:idcotizaciones
-// Si envías items -> reemplaza detalle (igual que pedidos)
+// ✅ Si mandas idagendacitas -> asegura que entren servicios de esa agenda
+// ✅ Si mandas items -> reemplaza detalle por (agenda + items)
 export const updateCotizacion = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -336,9 +455,7 @@ export const updateCotizacion = async (req, res) => {
       return res.status(404).json({ ok: false, msg: "Cotización no encontrada" });
     }
 
-    const { placa, idmpago, fecha } = req.body;
-
-    // estado controlado
+    // ✅ estado controlado
     if (hasOwn(req.body, "estado")) {
       const est = normalizeEstado(req.body.estado);
       if (!est) {
@@ -351,17 +468,51 @@ export const updateCotizacion = async (req, res) => {
       cot.estado = est;
     }
 
-    if (placa) {
-      const vehiculo = await Vehiculo.findByPk(String(placa).trim(), { transaction: t });
+    // ✅ agenda (puede venir para “colgar” la cotización a la agenda)
+    const agendaSent = hasOwn(req.body, "idagendacitas") || hasOwn(req.body, "idAgendaCitas") || hasOwn(req.body, "idagenda");
+    let newAgendaId = null;
+
+    if (agendaSent) {
+      newAgendaId = asInt(req.body.idagendacitas ?? req.body.idAgendaCitas ?? req.body.idagenda);
+      if (newAgendaId) {
+        const agenda = await getAgendaHeader(newAgendaId, t);
+        if (!agenda) {
+          await t.rollback();
+          return res.status(400).json({ ok: false, msg: "La agenda seleccionada no existe" });
+        }
+
+        // si mandan placa, debe coincidir
+        if (req.body.placa && String(req.body.placa).trim() !== String(agenda.placa).trim()) {
+          await t.rollback();
+          return res.status(400).json({
+            ok: false,
+            msg: "La placa enviada no coincide con la placa de la agenda",
+          });
+        }
+
+        // por seguridad, alineamos placa con la agenda
+        cot.placa = String(agenda.placa).trim();
+        cot.idagendacitas = newAgendaId;
+      } else {
+        // permiten quitar agenda
+        cot.idagendacitas = null;
+      }
+    }
+
+    // placa (solo si NO vino agendaSent, porque agenda manda la suya)
+    if (!agendaSent && req.body.placa) {
+      const placa = String(req.body.placa).trim();
+      const vehiculo = await Vehiculo.findByPk(placa, { transaction: t });
       if (!vehiculo) {
         await t.rollback();
         return res.status(400).json({ ok: false, msg: "La placa no existe" });
       }
-      cot.placa = String(placa).trim();
+      cot.placa = placa;
     }
 
-    if (idmpago) {
-      const idPago = asInt(idmpago);
+    // idmpago
+    if (req.body.idmpago) {
+      const idPago = asInt(req.body.idmpago);
       const metodo = await MetodoPago.findByPk(idPago, { transaction: t });
       if (!metodo) {
         await t.rollback();
@@ -370,27 +521,62 @@ export const updateCotizacion = async (req, res) => {
       cot.idmpago = idPago;
     }
 
-    if (fecha) cot.fecha = fecha;
+    // fecha
+    if (req.body.fecha) cot.fecha = req.body.fecha;
 
-    // items para master-detail (replace)
+    // items: replace detalle (pero ahora puede mezclar con agenda)
     const itemsSent =
       hasOwn(req.body, "items") || hasOwn(req.body, "detalles") || hasOwn(req.body, "servicios");
-    const items = normalizeItems(req.body.items ?? req.body.detalles ?? req.body.servicios);
+    const bodyItems = normalizeItems(req.body.items ?? req.body.detalles ?? req.body.servicios);
 
-    if (itemsSent) {
-      if (items.length === 0) {
-        await t.rollback();
-        return res
-          .status(400)
-          .json({ ok: false, msg: "Agrega al menos 1 servicio (items) para actualizar el detalle" });
+    // si cambió/mandó agenda -> traemos sus items
+    const effectiveAgendaId = cot.idagendacitas ? Number(cot.idagendacitas) : null;
+    const agendaItems = effectiveAgendaId ? await getItemsFromAgenda(effectiveAgendaId, t) : [];
+
+    // ¿Debemos tocar detalle?
+    // - si mandan items -> sí (replace por agenda+items)
+    // - si mandan agenda -> sí (asegura que estén los servicios agenda sin perder extras)
+    const mustTouchDetail = Boolean(itemsSent) || Boolean(agendaSent);
+
+    if (mustTouchDetail) {
+      // si solo mandaron agenda y NO mandaron items:
+      // queremos conservar los servicios que ya tenía la cotización + asegurar agenda.
+      let mergedItems = [];
+
+      if (!itemsSent && agendaSent) {
+        const oldRows = await DetalleCotizacion.findAll({
+          where: { idcotizaciones: id },
+          transaction: t,
+        });
+
+        const oldItems = normalizeItems(
+          oldRows.map((r) => ({
+            idservicios: r.idservicios,
+            preciochange: Number(r.preciochange),
+          }))
+        );
+
+        // orden: agenda primero, luego lo viejo (lo viejo mantiene cambios), sin duplicar
+        mergedItems = normalizeItems([...agendaItems, ...oldItems]);
+      } else if (itemsSent) {
+        // orden: agenda primero, luego items del body (body gana)
+        mergedItems = normalizeItems([...agendaItems, ...bodyItems]);
       }
 
-      // borra detalle viejo
+      // si tocamos detalle, NO puede quedar vacío
+      if (mergedItems.length === 0) {
+        await t.rollback();
+        return res.status(400).json({
+          ok: false,
+          msg: "Agrega al menos 1 servicio para actualizar el detalle",
+        });
+      }
+
+      // replace
       await DetalleCotizacion.destroy({ where: { idcotizaciones: id }, transaction: t });
 
-      // inserta detalle nuevo
       const detalleRows = [];
-      for (const it of items) {
+      for (const it of mergedItems) {
         const v = await assertServicioExiste(it.idservicios, t);
         if (!v.ok) {
           await t.rollback();
@@ -423,7 +609,7 @@ export const updateCotizacion = async (req, res) => {
   }
 };
 
-// DELETE /api/cotizaciones/:idcotizaciones  (borra detalle primero, como pedidos)
+// DELETE /api/cotizaciones/:idcotizaciones
 export const deleteCotizacion = async (req, res) => {
   const t = await sequelize.transaction();
   try {
@@ -439,7 +625,6 @@ export const deleteCotizacion = async (req, res) => {
       return res.status(404).json({ ok: false, msg: "Cotización no encontrada" });
     }
 
-    // detalle primero (por FK)
     await DetalleCotizacion.destroy({ where: { idcotizaciones: id }, transaction: t });
     await cot.destroy({ transaction: t });
 
@@ -453,14 +638,13 @@ export const deleteCotizacion = async (req, res) => {
 };
 
 /* =========================================================
-   DETALLE COTIZACIONES (puedes mantenerlo, pero ya NO es obligatorio)
-   ========================================================= */
+   DETALLE COTIZACIONES (lo dejas tal cual)
+========================================================= */
 
 export const testDetalleCotizacion = async (req, res) => {
   return res.json({ ok: true, msg: "detallecotizaciones OK" });
 };
 
-// POST /api/detallecotizaciones
 export const createDetalleCotizacion = async (req, res) => {
   try {
     const idservicios = asInt(req.body.idservicios);
@@ -503,7 +687,6 @@ export const createDetalleCotizacion = async (req, res) => {
   }
 };
 
-// GET /api/detallecotizaciones   o  /api/detallecotizaciones?cotizacion=1
 export const getDetallesCotizacion = async (req, res) => {
   try {
     const idcotizaciones = asInt(req.query.cotizacion);
@@ -514,7 +697,7 @@ export const getDetallesCotizacion = async (req, res) => {
       where,
       include: [
         { model: Servicio, as: "servicio", attributes: ["idservicios", "nombreservicios", "preciounitario"] },
-        { model: Cotizacion, as: "cotizacion", attributes: ["idcotizaciones", "placa", "estado", "fecha", "idmpago"] },
+        { model: Cotizacion, as: "cotizacion", attributes: ["idcotizaciones", "placa", "estado", "fecha", "idmpago", "idagendacitas"] },
       ],
       order: [["idcotizaciones", "DESC"], ["idservicios", "ASC"]],
     });
@@ -526,14 +709,11 @@ export const getDetallesCotizacion = async (req, res) => {
   }
 };
 
-// GET /api/detallecotizaciones/cotizacion/:idcotizaciones  (lo usa tu frontend)
-// ✅ Paginación opcional: ?page=1&limit=7
 export const getDetallesByCotizacion = async (req, res) => {
   try {
     const idcotizaciones = asInt(req.params.idcotizaciones);
     if (!idcotizaciones) return res.status(400).json({ ok: false, msg: "idcotizaciones inválido" });
 
-    // ✅ NO rompe: sin page/limit -> igual que antes
     if (!wantsPagination(req)) {
       const rows = await DetalleCotizacion.findAll({
         where: { idcotizaciones },
@@ -557,7 +737,6 @@ export const getDetallesByCotizacion = async (req, res) => {
       return res.json({ ok: true, data: detalles });
     }
 
-    // ✅ paginado (máx 7)
     const { page, limit, offset } = getPageLimit(req);
 
     const { rows, count } = await DetalleCotizacion.findAndCountAll({
@@ -593,7 +772,6 @@ export const getDetallesByCotizacion = async (req, res) => {
   }
 };
 
-// GET /api/detallecotizaciones/cotizacion/:idcotizaciones/total
 export const getTotalByCotizacion = async (req, res) => {
   try {
     const idcotizaciones = asInt(req.params.idcotizaciones);
@@ -607,7 +785,6 @@ export const getTotalByCotizacion = async (req, res) => {
   }
 };
 
-// PUT /api/detallecotizaciones/cotizacion/:idcotizaciones/servicio/:idservicios
 export const updateDetalleCotizacion = async (req, res) => {
   try {
     const idcotizaciones = asInt(req.params.idcotizaciones);
@@ -637,7 +814,6 @@ export const updateDetalleCotizacion = async (req, res) => {
   }
 };
 
-// DELETE /api/detallecotizaciones/cotizacion/:idcotizaciones/servicio/:idservicios
 export const deleteDetalleCotizacion = async (req, res) => {
   try {
     const idcotizaciones = asInt(req.params.idcotizaciones);
