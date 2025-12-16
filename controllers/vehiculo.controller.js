@@ -14,6 +14,39 @@ const fkMsg = () =>
 const normalizePlaca = (v) =>
   String(v || "").toUpperCase().replace(/\s+/g, "").trim();
 
+/* =========================
+   ✅ Helpers paginación (máx 7)
+   ========================= */
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+const MAX_LIMIT = 7;
+
+const wantsPagination = (req) => hasOwn(req?.query, "page") || hasOwn(req?.query, "limit");
+
+const getPageLimit = (req) => {
+  let page = parseInt(req.query?.page ?? "1", 10);
+  if (!Number.isFinite(page) || page < 1) page = 1;
+
+  let limit = parseInt(req.query?.limit ?? String(MAX_LIMIT), 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = MAX_LIMIT;
+
+  limit = Math.min(limit, MAX_LIMIT); // ✅ máximo 7
+  const offset = (page - 1) * limit;
+
+  return { page, limit, offset };
+};
+
+const buildPagination = (total, page, limit) => {
+  const totalPages = Math.max(1, Math.ceil((Number(total) || 0) / limit));
+  return {
+    page,
+    limit,
+    total: Number(total) || 0,
+    totalPages,
+    hasPrev: page > 1,
+    hasNext: page < totalPages,
+  };
+};
+
 function getLoggedNumeroDocumento(req) {
   // Soporta diferentes nombres según tu middleware de auth
   const u = req.user || req.usuario || req.auth || req?.jwt || null;
@@ -46,8 +79,6 @@ async function validateFKs({ idtipovehiculos, idmarca, numero_documento }) {
 
 /* ===========================
    ✅ Crear vehículo (ADMIN o genérico)
-   - Si viene numero_documento: lo usa
-   - Si NO viene: intenta tomarlo del usuario logueado (req.user)
 =========================== */
 export const create = async (req, res) => {
   try {
@@ -75,7 +106,7 @@ export const create = async (req, res) => {
       return res.status(400).json({ ok: false, msg: "Ya existe un vehículo con esa placa" });
     }
 
-    // Validar FKs para que no falle “silencioso”
+    // Validar FKs
     const fks = await validateFKs({ idtipovehiculos, idmarca, numero_documento });
     if (!fks.tipoOk) return res.status(400).json({ ok: false, msg: "Tipo de vehículo no válido" });
     if (!fks.marcaOk) return res.status(400).json({ ok: false, msg: "Marca no válida" });
@@ -97,32 +128,58 @@ export const create = async (req, res) => {
   }
 };
 
-// ✅ NUEVO: Listar SOLO mis vehículos (usuario logueado)
+// ✅ Listar SOLO mis vehículos (usuario logueado) (✅ paginación opcional máx 7)
 export const findMine = async (req, res) => {
   try {
     const numero_documento = String(getLoggedNumeroDocumento(req) || "").trim();
     if (!numero_documento) {
-      return res.status(401).json({ ok: false, msg: "No autenticado (no se pudo leer el usuario logueado)." });
+      return res.status(401).json({
+        ok: false,
+        msg: "No autenticado (no se pudo leer el usuario logueadoimed).",
+      });
     }
 
-    const vehiculos = await Vehiculo.findAll({
+    const include = [
+      { model: TipoVehiculo, as: "tipo", attributes: ["idtipovehiculos", "nombre"] },
+      { model: Marca, as: "marca", attributes: ["idmarca", "descripcion"] },
+      { model: Usuarios, as: "usuario", attributes: ["numero_documento", "nombre", "telefono", "email"] },
+    ];
+
+    // ✅ NO rompe: sin paginación -> igual que antes
+    if (!wantsPagination(req)) {
+      const vehiculos = await Vehiculo.findAll({
+        where: { numero_documento },
+        include,
+        order: [["placa", "ASC"]],
+      });
+      return res.json({ ok: true, data: vehiculos });
+    }
+
+    // ✅ paginado (máx 7)
+    const { page, limit, offset } = getPageLimit(req);
+
+    const { rows, count } = await Vehiculo.findAndCountAll({
       where: { numero_documento },
-      include: [
-        { model: TipoVehiculo, as: "tipo", attributes: ["idtipovehiculos", "nombre"] },
-        { model: Marca, as: "marca", attributes: ["idmarca", "descripcion"] },
-        { model: Usuarios, as: "usuario", attributes: ["numero_documento", "nombre", "telefono", "email"] },
-      ],
+      include,
       order: [["placa", "ASC"]],
+      limit,
+      offset,
+      distinct: true,
+      col: "placa", // ✅ tu PK suele ser placa (string)
     });
 
-    return res.json({ ok: true, data: vehiculos });
+    return res.json({
+      ok: true,
+      data: rows,
+      pagination: buildPagination(count, page, limit),
+    });
   } catch (err) {
     console.error("findMine vehiculos:", err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 };
 
-// ✅ NUEVO: Crear vehículo SOLO para el usuario logueado (ignora numero_documento del body)
+// ✅ Crear vehículo SOLO para el usuario logueado
 export const createMine = async (req, res) => {
   try {
     const numero_documento = String(getLoggedNumeroDocumento(req) || "").trim();
@@ -131,7 +188,6 @@ export const createMine = async (req, res) => {
     }
 
     const { placa, modelo, color, idtipovehiculos, idmarca } = req.body;
-
     const placaNorm = normalizePlaca(placa);
 
     if (!placaNorm || !modelo || !color || !idtipovehiculos || !idmarca) {
@@ -167,7 +223,7 @@ export const createMine = async (req, res) => {
   }
 };
 
-// Listar vehículos (✅ con filtro por numero_documento)
+// Listar vehículos (✅ con filtro por numero_documento) (✅ paginación opcional máx 7)
 export const findAll = async (req, res) => {
   try {
     const { numero_documento } = req.query;
@@ -175,16 +231,40 @@ export const findAll = async (req, res) => {
     const where = {};
     if (numero_documento) where.numero_documento = String(numero_documento);
 
-    const vehiculos = await Vehiculo.findAll({
+    const include = [
+      { model: TipoVehiculo, as: "tipo", attributes: ["idtipovehiculos", "nombre"] },
+      { model: Marca, as: "marca", attributes: ["idmarca", "descripcion"] },
+      { model: Usuarios, as: "usuario", attributes: ["numero_documento", "nombre", "telefono", "email"] },
+    ];
+
+    // ✅ NO rompe: sin paginación -> igual que antes
+    if (!wantsPagination(req)) {
+      const vehiculos = await Vehiculo.findAll({
+        where,
+        include,
+        order: [["placa", "ASC"]],
+      });
+      return res.json({ ok: true, data: vehiculos });
+    }
+
+    // ✅ paginado (máx 7)
+    const { page, limit, offset } = getPageLimit(req);
+
+    const { rows, count } = await Vehiculo.findAndCountAll({
       where,
-      include: [
-        { model: TipoVehiculo, as: "tipo", attributes: ["idtipovehiculos", "nombre"] },
-        { model: Marca, as: "marca", attributes: ["idmarca", "descripcion"] },
-        { model: Usuarios, as: "usuario", attributes: ["numero_documento", "nombre", "telefono", "email"] },
-      ],
+      include,
+      order: [["placa", "ASC"]],
+      limit,
+      offset,
+      distinct: true,
+      col: "placa",
     });
 
-    return res.json({ ok: true, data: vehiculos });
+    return res.json({
+      ok: true,
+      data: rows,
+      pagination: buildPagination(count, page, limit),
+    });
   } catch (err) {
     console.error("findAll vehiculos:", err);
     return res.status(500).json({ ok: false, error: err.message });

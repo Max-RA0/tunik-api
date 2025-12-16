@@ -15,6 +15,10 @@ const Servicios = sequelize.define(
       type: DataTypes.STRING(100),
       allowNull: false,
     },
+    descripcion: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+    },
     idcategoriaservicios: {
       type: DataTypes.INTEGER,
       allowNull: false,

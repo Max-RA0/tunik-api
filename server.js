@@ -1,10 +1,8 @@
 // server/server.js
-import "dotenv/config"; // ✅ carga .env / env vars antes de importar db.js
+import "dotenv/config"; 
 import express from "express";
 import cors from "cors";
-
 import sequelize from "./config/db.js";
-
 import tipovehiculosRoutes from "./routes/tipovehiculos.routes.js";
 import categoriaserviciosRoutes from "./routes/categoriaservicios.routes.js";
 import rolesRoutes from "./routes/roles.routes.js";
@@ -20,7 +18,7 @@ import productosRoutes from "./routes/productos.routes.js";
 import cotizacionesRoutes, {
   detalleCotizacionesRouter,
 } from "./routes/cotizaciones.routes.js";
-import agendacitasRoutes from "./routes/agendacitas.routes.js";
+import agendacitasRouter, { detalleAgendacitasRouter } from "./routes/agendacitas.routes.js";
 import pedidosRoutes from "./routes/pedidos.routes.js";
 import dashboardRoutes from "./routes/dashboard.routes.js";
 
@@ -28,11 +26,8 @@ const app = express();
 app.set("trust proxy", 1);
 
 const PORT = Number(process.env.PORT) || 3000;
-
-// ✅ CORS simple (si luego quieres restringir dominios, lo ajustamos)
 app.use(cors());
 
-// ✅ Body parsers
 app.use(
   express.json({
     type: ["application/json", "application/*+json"],
@@ -44,7 +39,6 @@ app.use(
 );
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
-// ✅ Healthcheck para Render
 app.get("/", (_req, res) => {
   res.json({ ok: true, service: "tunik-api", status: "up" });
 });
@@ -52,7 +46,7 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-// ✅ Conexión DB (no tumba el deploy; deja log claro)
+
 try {
   await sequelize.authenticate();
   console.log("✅ Conectado a MySQL correctamente.");
@@ -91,7 +85,8 @@ app.use("/api/productos", productosRoutes);
 app.use("/api/evaluaciones", evaluacionesRoutes);
 
 // Agenda
-app.use("/api/agendacitas", agendacitasRoutes);
+app.use("/api/agendacitas", agendacitasRouter);
+app.use("/api/detalleagendacitas", detalleAgendacitasRouter);
 
 // ✅ Manejo de errores (evita “crash silencioso”)
 app.use((err, _req, res, _next) => {

@@ -4,7 +4,7 @@ import crypto from "crypto";
 import Usuarios from "../models/usuarios.js";
 import sequelize from "../config/db.js";
 import { QueryTypes } from "sequelize";
-import { Resend } from "resend"; // ✅ Resend (HTTP), NO SMTP
+import { transporter } from "../config/nodemailer.js"; // <- corregido
 
 const ROLE_ADMIN = "Administrador";
 const ROLE_CLIENTE = "Cliente";
@@ -66,6 +66,7 @@ export const login = async (req, res) => {
       return res.status(401).json({ ok: false, msg: "Contraseña incorrecta" });
     }
 
+    // ✅ Rol simple (Administrador / Cliente) desde tabla roles
     const rol = await getRoleNameById(usuario.idroles);
 
     return res.json({
@@ -76,7 +77,7 @@ export const login = async (req, res) => {
         nombre: usuario.nombre,
         email: usuario.email,
         idroles: usuario.idroles,
-        rol,
+        rol, // <- "Administrador" o "Cliente"
       },
     });
   } catch (error) {
@@ -93,10 +94,7 @@ export const hashPasswordsOnce = async (req, res) => {
     const usuarios = await Usuarios.findAll();
 
     for (const user of usuarios) {
-      if (
-        typeof user.contrasena === "string" &&
-        user.contrasena.startsWith("$2")
-      )
+      if (typeof user.contrasena === "string" && user.contrasena.startsWith("$2"))
         continue;
 
       const hashedPassword = await bcrypt.hash(String(user.contrasena), 10);
@@ -125,6 +123,7 @@ export const register = async (req, res) => {
       idroles,
     } = req.body;
 
+    // normaliza
     numero_documento = String(numero_documento || "").trim();
     tipo_documento = String(tipo_documento || "").trim();
     nombre = String(nombre || "").trim();
@@ -132,6 +131,7 @@ export const register = async (req, res) => {
     email = String(email || "").trim().toLowerCase();
     contrasena = String(contrasena || "");
 
+    // valida requeridos (según tu modelo)
     if (
       !numero_documento ||
       !tipo_documento ||
@@ -152,6 +152,7 @@ export const register = async (req, res) => {
       });
     }
 
+    // evita duplicados
     const existeEmail = await Usuarios.findOne({ where: { email } });
     if (existeEmail) {
       return res
@@ -166,6 +167,7 @@ export const register = async (req, res) => {
         .json({ ok: false, msg: "Ese documento ya está registrado." });
     }
 
+    // ✅ rol por defecto: Cliente (si no mandan idroles)
     let roleId = Number(idroles || 0);
     if (!Number.isFinite(roleId) || roleId <= 0) {
       const clienteId = await getRoleIdByName(ROLE_CLIENTE);
@@ -173,9 +175,12 @@ export const register = async (req, res) => {
     }
 
     if (!roleId) {
+      // fallback seguro (si tu tabla roles está vacía o no coincide el texto)
+      // Ajusta este número si en tu BD el Cliente no es 2.
       roleId = 2;
     }
 
+    // hash
     const hashed = await bcrypt.hash(contrasena, 10);
 
     await Usuarios.create({
@@ -196,14 +201,6 @@ export const register = async (req, res) => {
 };
 
 /* ---------------- Password reset ---------------- */
-function buildResetLink(token) {
-  const front = (process.env.FRONT_URL || "http://localhost:5173").replace(
-    /\/+$/,
-    ""
-  );
-  return `${front}/reset-password/${token}`;
-}
-
 export const requestPasswordReset = async (req, res) => {
   try {
     const { email } = req.body;
@@ -218,39 +215,27 @@ export const requestPasswordReset = async (req, res) => {
     if (!usuario)
       return res.status(404).json({ ok: false, msg: "Correo no registrado." });
 
+    // Crear token seguro
     const token = crypto.randomBytes(40).toString("hex");
-    const expires = new Date(Date.now() + 15 * 60 * 1000);
+    const expires = new Date(Date.now() + 15 * 60 * 1000); // 15 min
 
     await usuario.update({
       reset_token: token,
       token_expires: expires,
     });
 
-    const link = buildResetLink(token);
+    const link = `http://localhost:5173/reset-password/${token}`;
 
-    // ✅ Resend
-    const apiKey = process.env.RESEND_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({
-        ok: false,
-        msg: "Falta RESEND_API_KEY en variables de entorno (Render).",
-      });
-    }
-
-    const resend = new Resend(apiKey);
-
-    const from =
-      process.env.EMAIL_FROM || `Soporte Tunik <onboarding@resend.dev>`;
-
-    await resend.emails.send({
-      from,
+    // -------- Enviar correo --------
+    await transporter.sendMail({
+      from: `"Soporte Tunik" <${process.env.EMAIL_USER}>`,
       to: usuario.email,
       subject: "Recuperación de contraseña",
       html: `
         <p>Hola <strong>${usuario.nombre}</strong>,</p>
         <p>Solicitaste un cambio de contraseña.</p>
         <p>Haz clic en el siguiente enlace para restablecerla:</p>
-        <p><a href="${link}">${link}</a></p>
+        <a href="${link}">${link}</a>
         <p><strong>El enlace expira en 15 minutos.</strong></p>
       `,
     });
@@ -258,10 +243,7 @@ export const requestPasswordReset = async (req, res) => {
     return res.json({ ok: true, msg: "Correo enviado correctamente." });
   } catch (error) {
     console.error("Error en requestPasswordReset:", error);
-    return res.status(500).json({
-      ok: false,
-      msg: "Error al enviar el correo de recuperación.",
-    });
+    return res.status(500).json({ ok: false, msg: "Error en el servidor." });
   }
 };
 

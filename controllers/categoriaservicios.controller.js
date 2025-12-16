@@ -2,6 +2,9 @@
 import { Op } from "sequelize";
 import CategoriaServicios from "../models/categoriaservicios.js";
 
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+const MAX_LIMIT = 7;
+
 // Crear categoría
 export const create = async (req, res) => {
   try {
@@ -23,10 +26,11 @@ export const create = async (req, res) => {
   }
 };
 
-// Listar con búsqueda opcional (?q=)
+// Listar con búsqueda opcional (?q=) + paginación opcional (?page=&limit=) máx 7
 export const findAll = async (req, res) => {
   try {
     const q = (req.query.q || "").trim();
+
     const where = q
       ? {
           [Op.or]: [
@@ -36,12 +40,50 @@ export const findAll = async (req, res) => {
         }
       : {};
 
-    const rows = await CategoriaServicios.findAll({
+    const wantsPagination = hasOwn(req.query, "page") || hasOwn(req.query, "limit");
+
+    // ✅ NO rompe: si no envían page/limit, se comporta como antes
+    if (!wantsPagination) {
+      const rows = await CategoriaServicios.findAll({
+        where,
+        order: [["idcategoriaservicios", "ASC"]],
+      });
+
+      return res.json({ ok: true, data: rows });
+    }
+
+    // ✅ paginación (máx 7)
+    let page = parseInt(req.query.page ?? "1", 10);
+    if (!Number.isFinite(page) || page < 1) page = 1;
+
+    let limit = parseInt(req.query.limit ?? String(MAX_LIMIT), 10);
+    if (!Number.isFinite(limit) || limit < 1) limit = MAX_LIMIT;
+
+    limit = Math.min(limit, MAX_LIMIT);
+    const offset = (page - 1) * limit;
+
+    const { rows, count } = await CategoriaServicios.findAndCountAll({
       where,
       order: [["idcategoriaservicios", "ASC"]],
+      limit,
+      offset,
+      distinct: true,
     });
 
-    res.json({ ok: true, data: rows });
+    const totalPages = Math.max(1, Math.ceil((Number(count) || 0) / limit));
+
+    return res.json({
+      ok: true,
+      data: rows,
+      pagination: {
+        page,
+        limit,
+        total: Number(count) || 0,
+        totalPages,
+        hasPrev: page > 1,
+        hasNext: page < totalPages,
+      },
+    });
   } catch (err) {
     console.error("findAll categoriaservicios:", err);
     res.status(500).json({ ok: false, msg: "Error en findAll", detail: err.message });
@@ -53,7 +95,9 @@ export const findOne = async (req, res) => {
   try {
     const id = Number(req.params.id);
     const item = await CategoriaServicios.findByPk(id);
+
     if (!item) return res.status(404).json({ ok: false, msg: "No encontrada" });
+
     res.json({ ok: true, data: item });
   } catch (err) {
     console.error("findOne categoriaservicios:", err);
@@ -66,6 +110,7 @@ export const update = async (req, res) => {
   try {
     const id = Number(req.params.id);
     const item = await CategoriaServicios.findByPk(id);
+
     if (!item) return res.status(404).json({ ok: false, msg: "No encontrada" });
 
     const { nombrecategorias, descripcion } = req.body;
@@ -92,6 +137,7 @@ export const remove = async (req, res) => {
   try {
     const id = Number(req.params.id);
     const item = await CategoriaServicios.findByPk(id);
+
     if (!item) return res.status(404).json({ ok: false, msg: "No encontrada" });
 
     await item.destroy();

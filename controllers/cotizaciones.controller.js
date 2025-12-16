@@ -13,6 +13,35 @@ import Servicio from "../models/servicios.js";
 const safeArray = (x) => (Array.isArray(x) ? x : []);
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
+// ✅ Paginación
+const MAX_LIMIT = 7;
+const wantsPagination = (req) => hasOwn(req?.query, "page") || hasOwn(req?.query, "limit");
+
+const getPageLimit = (req) => {
+  let page = parseInt(req.query?.page ?? "1", 10);
+  if (!Number.isFinite(page) || page < 1) page = 1;
+
+  let limit = parseInt(req.query?.limit ?? String(MAX_LIMIT), 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = MAX_LIMIT;
+
+  limit = Math.min(limit, MAX_LIMIT); // ✅ cap a 7
+  const offset = (page - 1) * limit;
+
+  return { page, limit, offset };
+};
+
+const buildPagination = (total, page, limit) => {
+  const totalPages = Math.max(1, Math.ceil((Number(total) || 0) / limit));
+  return {
+    page,
+    limit,
+    total: Number(total) || 0,
+    totalPages,
+    hasPrev: page > 1,
+    hasNext: page < totalPages,
+  };
+};
+
 const asInt = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? Math.trunc(n) : null;
@@ -115,7 +144,7 @@ export const createCotizacion = async (req, res) => {
         placa,
         idmpago,
         estado,
-        // si no envían fecha, guardo hoy (tu tabla tiene DEFAULT CURRENT_DATE, pero aquí lo aseguro)
+        // si no envían fecha, guardo hoy
         fecha: fecha ?? new Date(),
       },
       { transaction: t }
@@ -156,6 +185,7 @@ export const createCotizacion = async (req, res) => {
 };
 
 // GET /api/cotizaciones?placa=XXX&numero_documento=YYY
+// ✅ Ahora soporta paginación opcional: ?page=1&limit=7
 export const getCotizaciones = async (req, res) => {
   try {
     const { placa, numero_documento } = req.query;
@@ -170,21 +200,67 @@ export const getCotizaciones = async (req, res) => {
     };
 
     const where = {};
-    if (placa) where.placa = String(placa);
+    if (placa) where.placa = String(placa).trim();
 
-    const cotizaciones = await Cotizacion.findAll({
+    // ✅ NO rompe: si no piden paginación, se comporta como antes
+    if (!wantsPagination(req)) {
+      const cotizaciones = await Cotizacion.findAll({
+        where,
+        include: [
+          includeVehiculo,
+          { model: MetodoPago, as: "metodoPago", attributes: ["idmpago", "nombremetodo"] },
+        ],
+        order: [["idcotizaciones", "DESC"]],
+      });
+
+      if (!cotizaciones.length) return res.json({ ok: true, data: [] });
+
+      const ids = cotizaciones.map((c) => c.idcotizaciones);
+
+      const filasTotales = await DetalleCotizacion.findAll({
+        attributes: ["idcotizaciones", [fn("SUM", col("preciochange")), "total"]],
+        where: { idcotizaciones: ids },
+        group: ["idcotizaciones"],
+        raw: true,
+      });
+
+      const mapaTotales = {};
+      for (const fila of filasTotales) mapaTotales[fila.idcotizaciones] = Number(fila.total || 0);
+
+      const respuesta = cotizaciones.map((c) => {
+        const json = c.toJSON();
+        json.total = mapaTotales[c.idcotizaciones] || 0;
+        return json;
+      });
+
+      return res.json({ ok: true, data: respuesta });
+    }
+
+    // ✅ PAGINADO (máx 7)
+    const { page, limit, offset } = getPageLimit(req);
+
+    const { rows, count } = await Cotizacion.findAndCountAll({
       where,
       include: [
         includeVehiculo,
         { model: MetodoPago, as: "metodoPago", attributes: ["idmpago", "nombremetodo"] },
       ],
       order: [["idcotizaciones", "DESC"]],
+      limit,
+      offset,
+      distinct: true, // ✅ importantísimo por los include
     });
 
-    if (!cotizaciones.length) return res.json({ ok: true, data: [] });
+    if (!rows.length) {
+      return res.json({
+        ok: true,
+        data: [],
+        pagination: buildPagination(count, page, limit),
+      });
+    }
 
-    // total por cotización (SUM detalle)
-    const ids = cotizaciones.map((c) => c.idcotizaciones);
+    // total por cotización (SUM detalle) SOLO para los ids de la página actual
+    const ids = rows.map((c) => c.idcotizaciones);
 
     const filasTotales = await DetalleCotizacion.findAll({
       attributes: ["idcotizaciones", [fn("SUM", col("preciochange")), "total"]],
@@ -194,17 +270,19 @@ export const getCotizaciones = async (req, res) => {
     });
 
     const mapaTotales = {};
-    for (const fila of filasTotales) {
-      mapaTotales[fila.idcotizaciones] = Number(fila.total || 0);
-    }
+    for (const fila of filasTotales) mapaTotales[fila.idcotizaciones] = Number(fila.total || 0);
 
-    const respuesta = cotizaciones.map((c) => {
+    const respuesta = rows.map((c) => {
       const json = c.toJSON();
       json.total = mapaTotales[c.idcotizaciones] || 0;
       return json;
     });
 
-    return res.json({ ok: true, data: respuesta });
+    return res.json({
+      ok: true,
+      data: respuesta,
+      pagination: buildPagination(count, page, limit),
+    });
   } catch (err) {
     console.error("getCotizaciones:", err);
     return res.status(500).json({ ok: false, msg: err.message || "Error en el servidor" });
@@ -449,18 +527,48 @@ export const getDetallesCotizacion = async (req, res) => {
 };
 
 // GET /api/detallecotizaciones/cotizacion/:idcotizaciones  (lo usa tu frontend)
+// ✅ Paginación opcional: ?page=1&limit=7
 export const getDetallesByCotizacion = async (req, res) => {
   try {
     const idcotizaciones = asInt(req.params.idcotizaciones);
     if (!idcotizaciones) return res.status(400).json({ ok: false, msg: "idcotizaciones inválido" });
 
-    const rows = await DetalleCotizacion.findAll({
+    // ✅ NO rompe: sin page/limit -> igual que antes
+    if (!wantsPagination(req)) {
+      const rows = await DetalleCotizacion.findAll({
+        where: { idcotizaciones },
+        include: [{ model: Servicio, as: "servicio", attributes: ["idservicios", "nombreservicios", "preciounitario"] }],
+        order: [["idservicios", "ASC"]],
+      });
+
+      const detalles = rows.map((d) => ({
+        idservicios: d.idservicios,
+        idcotizaciones: d.idcotizaciones,
+        preciochange: d.preciochange,
+        servicio: d.servicio
+          ? {
+              idservicios: d.servicio.idservicios,
+              nombreservicios: d.servicio.nombreservicios,
+              preciounitario: d.servicio.preciounitario,
+            }
+          : null,
+      }));
+
+      return res.json({ ok: true, data: detalles });
+    }
+
+    // ✅ paginado (máx 7)
+    const { page, limit, offset } = getPageLimit(req);
+
+    const { rows, count } = await DetalleCotizacion.findAndCountAll({
       where: { idcotizaciones },
       include: [{ model: Servicio, as: "servicio", attributes: ["idservicios", "nombreservicios", "preciounitario"] }],
       order: [["idservicios", "ASC"]],
+      limit,
+      offset,
+      distinct: true,
     });
 
-    // mismo shape que venías armando
     const detalles = rows.map((d) => ({
       idservicios: d.idservicios,
       idcotizaciones: d.idcotizaciones,
@@ -474,7 +582,11 @@ export const getDetallesByCotizacion = async (req, res) => {
         : null,
     }));
 
-    return res.json({ ok: true, data: detalles });
+    return res.json({
+      ok: true,
+      data: detalles,
+      pagination: buildPagination(count, page, limit),
+    });
   } catch (err) {
     console.error("getDetallesByCotizacion:", err);
     return res.status(500).json({ ok: false, msg: err.message || "Error en el servidor" });

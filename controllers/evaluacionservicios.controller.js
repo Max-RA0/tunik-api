@@ -4,6 +4,38 @@ import EvaluacionServicio from "../models/evaluacionservicios.model.js";
 import Usuario from "../models/usuarios.js";
 import Servicio from "../models/servicios.js";
 
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+const MAX_LIMIT = 7;
+
+function wantsPagination(req) {
+  return hasOwn(req?.query, "page") || hasOwn(req?.query, "limit");
+}
+
+function getPageLimit(req) {
+  let page = parseInt(req.query?.page ?? "1", 10);
+  if (!Number.isFinite(page) || page < 1) page = 1;
+
+  let limit = parseInt(req.query?.limit ?? String(MAX_LIMIT), 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = MAX_LIMIT;
+
+  limit = Math.min(limit, MAX_LIMIT); // ✅ máximo 7
+  const offset = (page - 1) * limit;
+
+  return { page, limit, offset };
+}
+
+function buildPagination(total, page, limit) {
+  const totalPages = Math.max(1, Math.ceil((Number(total) || 0) / limit));
+  return {
+    page,
+    limit,
+    total: Number(total) || 0,
+    totalPages,
+    hasPrev: page > 1,
+    hasNext: page < totalPages,
+  };
+}
+
 function normalizeRating(input) {
   const n =
     input?.calificacion ??
@@ -33,6 +65,7 @@ function exposeRow(row) {
 }
 
 // GET /api/evaluaciones?search=XYZ
+// ✅ Paginación opcional: ?page=1&limit=7
 export async function list(req, res) {
   try {
     const q = String(req.query.search ?? "").trim();
@@ -45,7 +78,7 @@ export async function list(req, res) {
         { comentarios: { [Op.like]: `%${q}%` } },
       ];
 
-      // Si es numérico, también busca por idevaluacion o idservicios (mejor que LIKE)
+      // Si es numérico, también busca por idevaluacion o idservicios
       if (/^\d+$/.test(q)) {
         const n = Number(q);
         or.push({ idevaluacion: n });
@@ -55,12 +88,32 @@ export async function list(req, res) {
       where = { [Op.or]: or };
     }
 
-    const rows = await EvaluacionServicio.findAll({
+    // ✅ NO rompe: si no piden paginación -> igual que antes
+    if (!wantsPagination(req)) {
+      const rows = await EvaluacionServicio.findAll({
+        where,
+        order: [["idevaluacion", "DESC"]],
+      });
+
+      return res.json({ ok: true, data: rows.map(exposeRow) });
+    }
+
+    // ✅ paginado (máx 7)
+    const { page, limit, offset } = getPageLimit(req);
+
+    const { rows, count } = await EvaluacionServicio.findAndCountAll({
       where,
       order: [["idevaluacion", "DESC"]],
+      limit,
+      offset,
+      distinct: true,
     });
 
-    return res.json({ ok: true, data: rows.map(exposeRow) });
+    return res.json({
+      ok: true,
+      data: rows.map(exposeRow),
+      pagination: buildPagination(count, page, limit),
+    });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, msg: "Error listando evaluaciones" });
@@ -117,7 +170,7 @@ export async function create(req, res) {
       numero_documento: String(numero_documento),
       idservicios: Number(idservicios),
       respuestacalificacion: String(rating),
-      comentarios: c.value, // ✅ nuevo
+      comentarios: c.value,
     });
 
     return res.status(201).json({ ok: true, data: exposeRow(created) });

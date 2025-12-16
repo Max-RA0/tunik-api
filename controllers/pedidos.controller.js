@@ -12,6 +12,35 @@ const asInt = (v) => {
 const safeArray = (x) => (Array.isArray(x) ? x : []);
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
+// ✅ Paginación
+const MAX_LIMIT = 7;
+const wantsPagination = (req) => hasOwn(req?.query, "page") || hasOwn(req?.query, "limit");
+
+const getPageLimit = (req) => {
+  let page = parseInt(req.query?.page ?? "1", 10);
+  if (!Number.isFinite(page) || page < 1) page = 1;
+
+  let limit = parseInt(req.query?.limit ?? String(MAX_LIMIT), 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = MAX_LIMIT;
+
+  limit = Math.min(limit, MAX_LIMIT); // ✅ cap 7
+  const offset = (page - 1) * limit;
+
+  return { page, limit, offset };
+};
+
+const buildPagination = (total, page, limit) => {
+  const totalPages = Math.max(1, Math.ceil((Number(total) || 0) / limit));
+  return {
+    page,
+    limit,
+    total: Number(total) || 0,
+    totalPages,
+    hasPrev: page > 1,
+    hasNext: page < totalPages,
+  };
+};
+
 // une productos repetidos (por PK compuesta)
 const normalizeItems = (items) => {
   const map = new Map();
@@ -49,11 +78,31 @@ async function assertProductoValidoParaProveedor(idproductos, idproveedor, t) {
 
 export const getPedidos = async (req, res) => {
   try {
-    const pedidos = await Pedido.findAll({
+    // ✅ NO rompe: sin paginación -> igual que antes
+    if (!wantsPagination(req)) {
+      const pedidos = await Pedido.findAll({
+        include: [{ model: Proveedor, as: "proveedor" }],
+        order: [["idpedidos", "DESC"]],
+      });
+      return res.json({ ok: true, data: pedidos });
+    }
+
+    // ✅ paginado (máx 7)
+    const { page, limit, offset } = getPageLimit(req);
+
+    const { rows, count } = await Pedido.findAndCountAll({
       include: [{ model: Proveedor, as: "proveedor" }],
       order: [["idpedidos", "DESC"]],
+      limit,
+      offset,
+      distinct: true, // ✅ importante por include
     });
-    return res.json({ ok: true, data: pedidos });
+
+    return res.json({
+      ok: true,
+      data: rows,
+      pagination: buildPagination(count, page, limit),
+    });
   } catch (err) {
     console.error("getPedidos:", err);
     return res.status(500).json({ ok: false, msg: err.message || "Error en el servidor" });
