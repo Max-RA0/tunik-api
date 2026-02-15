@@ -9,7 +9,12 @@ const CategoriaServicio = sequelize.define('CategoriaServicio', {
   },
   nombrecategoriaservicio: {
     type: DataTypes.STRING(100),
-    allowNull: false
+    allowNull: false,
+    field: 'nombrecategorias'
+  },
+  descripcion: {
+    type: DataTypes.STRING(255),
+    allowNull: true
   }
 }, {
   tableName: 'categoriaservicios',

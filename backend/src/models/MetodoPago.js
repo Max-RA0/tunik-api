@@ -9,7 +9,8 @@ const MetodoPago = sequelize.define('MetodoPago', {
   },
   nombrempago: {
     type: DataTypes.STRING(50),
-    allowNull: false
+    allowNull: false,
+    field: 'nombremetodo'
   }
 }, {
   tableName: 'metodospago',
