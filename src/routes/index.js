@@ -13,11 +13,14 @@ const inventoryRoutes = require('./inventory.routes');
 const ratingsRoutes = require('./ratings.routes');
 const dashboardRoutes = require('./dashboard.routes');
 const permisosRoutes = require('./permisos.routes');
-
+const profilesRoutes = require('./profile.routes');
 const router = express.Router();
 
 // Auth routes (no prefix needed, already at /api/auth)
 router.use('/auth', authRoutes);
+
+// Profiles
+router.use('/profile', profilesRoutes);
 
 // Users and Roles
 router.use('/usuarios', usersRoutes);

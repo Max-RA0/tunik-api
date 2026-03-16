@@ -1,6 +1,6 @@
 const paginate = (query) => {
   const page = Math.max(1, parseInt(query.page) || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(query.pageSize) || 20));
+  const pageSize = Math.min(100, Math.max(1, parseInt(query.pageSize) || 10));
   const offset = (page - 1) * pageSize;
 
   return {
@@ -13,7 +13,7 @@ const paginate = (query) => {
 
 const paginatedResponse = (data, total, pagination) => {
   const { page, pageSize } = pagination;
-  const totalPages = Math.ceil(total / pageSize);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   return {
     items: data,

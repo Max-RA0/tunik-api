@@ -1,11 +1,68 @@
 // src/services/sales.service.js
 // KEYWORDS: SALES_SERVICE / MULTI_VEHICLES / DETALLES_WITH_PLACA / TRANSACTION / TOTAL_CALC
+// KEYWORDS: CONSUMO_PRODUCTO / AUTO_DISCOUNT_STOCK / CONVERT_CONSUMO_TO_BASE
 
-const { Venta, DetalleVenta, PagoVenta, MetodoPago, Servicio } = require("../models");
+const { Venta, DetalleVenta, PagoVenta, MetodoPago, Servicio, Producto } = require("../models");
 const { Op } = require("sequelize");
 const { sequelize } = require("../database/connection");
 
 class SalesService {
+  // KEYWORDS: CONVERT_CONSUMO_TO_BASE / VOLUMEN / LONGITUD / UNIDAD
+  convertirConsumoABase(producto, cantidadConsumo, unidadConsumo) {
+    const cantidad = Number(cantidadConsumo);
+    const unidad = String(unidadConsumo || "").toLowerCase().trim();
+
+    if (Number.isNaN(cantidad) || cantidad <= 0) {
+      const error = new Error("La cantidad de consumo debe ser mayor a 0");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (!producto?.tipomedida || !producto?.unidadbase) {
+      const error = new Error(
+        `El producto ${producto?.nombreproductos || ""} no tiene tipo de medida o unidad base configurada`
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+
+    // KEYWORDS: CONVERSION_VOLUMEN
+    if (producto.tipomedida === "volumen") {
+      if (unidad === "ml") return cantidad;
+      if (unidad === "l" || unidad === "lt" || unidad === "litro" || unidad === "litros") {
+        return cantidad * 1000;
+      }
+      if (unidad === "gal" || unidad === "galon" || unidad === "galones") {
+        return cantidad * 3785.41;
+      }
+
+      const error = new Error("Unidad de consumo no válida para productos de volumen");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    // KEYWORDS: CONVERSION_LONGITUD
+    if (producto.tipomedida === "longitud") {
+      if (unidad === "cm") return cantidad;
+      if (unidad === "m" || unidad === "metro" || unidad === "metros") {
+        return cantidad * 100;
+      }
+
+      const error = new Error("Unidad de consumo no válida para productos de longitud");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    // KEYWORDS: CONVERSION_UNIDAD
+    if (producto.tipomedida === "unidad") {
+      return cantidad;
+    }
+
+    const error = new Error("Tipo de medida no soportado");
+    error.statusCode = 400;
+    throw error;
+  }
+
   // Ventas
   async findAll(query = {}) {
     const { estado, from, to } = query;
@@ -20,7 +77,14 @@ class SalesService {
     return await Venta.findAll({
       where,
       include: [
-        { model: DetalleVenta, as: "detalles", include: [{ model: Servicio, as: "servicio" }] },
+        {
+          model: DetalleVenta,
+          as: "detalles",
+          include: [
+            { model: Servicio, as: "servicio" },
+            { model: Producto, as: "producto", required: false },
+          ],
+        },
         { model: PagoVenta, as: "pagos", include: [{ model: MetodoPago, as: "metodoPago" }] },
       ],
       order: [["fecha", "DESC"]],
@@ -30,7 +94,14 @@ class SalesService {
   async findById(idventas) {
     const venta = await Venta.findByPk(idventas, {
       include: [
-        { model: DetalleVenta, as: "detalles", include: [{ model: Servicio, as: "servicio" }] },
+        {
+          model: DetalleVenta,
+          as: "detalles",
+          include: [
+            { model: Servicio, as: "servicio" },
+            { model: Producto, as: "producto", required: false },
+          ],
+        },
         { model: PagoVenta, as: "pagos", include: [{ model: MetodoPago, as: "metodoPago" }] },
       ],
     });
@@ -60,19 +131,65 @@ class SalesService {
       );
 
       if (Array.isArray(detalles) && detalles.length > 0) {
-        // KEYWORDS: MAP_DETALLES_WITH_PLACA
-        const detallesData = detalles.map((d) => ({
-          idventas: venta.idventas,
-          idservicios: d.idservicios,
-          cantidad: d.cantidad || 1,
-          precio_unitario: d.precio_unitario,
+        for (const d of detalles) {
+          let cantidadConsumoBase = null;
 
-          // ✅ NUEVO: multi-vehículos
-          placa: d.placa || null,
-          descripcionvehiculo: d.descripcionvehiculo || null,
-        }));
+          // KEYWORDS: CONSUMO_PRODUCTO / AUTO_DISCOUNT_STOCK
+          if (
+            d.idproducto !== undefined &&
+            d.idproducto !== null &&
+            d.cantidadconsumo !== undefined &&
+            d.cantidadconsumo !== null &&
+            d.unidadconsumo
+          ) {
+            const producto = await Producto.findByPk(Number(d.idproducto), { transaction });
 
-        await DetalleVenta.bulkCreate(detallesData, { transaction });
+            if (!producto) {
+              const error = new Error("Producto no encontrado");
+              error.statusCode = 404;
+              throw error;
+            }
+
+            cantidadConsumoBase = this.convertirConsumoABase(
+              producto,
+              d.cantidadconsumo,
+              d.unidadconsumo
+            );
+
+            const stockActual = Number(producto.stockbase || 0);
+
+            if (stockActual < cantidadConsumoBase) {
+              const error = new Error(`Stock insuficiente para ${producto.nombreproductos}`);
+              error.statusCode = 400;
+              throw error;
+            }
+
+            await producto.update(
+              {
+                stockbase: Number((stockActual - cantidadConsumoBase).toFixed(3)),
+              },
+              { transaction }
+            );
+          }
+
+          await DetalleVenta.create(
+            {
+              idventas: venta.idventas,
+              idservicios: d.idservicios,
+              cantidad: d.cantidad || 1,
+              precio_unitario: d.precio_unitario,
+              placa: d.placa || null,
+              descripcionvehiculo: d.descripcionvehiculo || null,
+
+              // KEYWORDS: NUEVOS_CAMPOS_CONSUMO
+              idproducto: d.idproducto || null,
+              cantidadconsumo: d.cantidadconsumo || null,
+              unidadconsumo: d.unidadconsumo || null,
+              cantidadconsumobase: cantidadConsumoBase,
+            },
+            { transaction }
+          );
+        }
 
         // KEYWORDS: TOTAL_CALC
         const calculatedTotal = detalles.reduce((sum, d) => {
@@ -119,6 +236,7 @@ class SalesService {
       include: [
         { model: Venta, as: "venta" },
         { model: Servicio, as: "servicio" },
+        { model: Producto, as: "producto", required: false },
       ],
     });
   }
@@ -126,20 +244,88 @@ class SalesService {
   async findDetallesByVenta(idventas) {
     return await DetalleVenta.findAll({
       where: { idventas },
-      include: [{ model: Servicio, as: "servicio" }],
+      include: [
+        { model: Servicio, as: "servicio" },
+        { model: Producto, as: "producto", required: false },
+      ],
     });
   }
 
   async createDetalle(data) {
-    const detalle = await DetalleVenta.create(data);
+    const transaction = await sequelize.transaction();
 
-    const detalles = await DetalleVenta.findAll({ where: { idventas: data.idventas } });
-    const total = detalles.reduce((sum, d) => sum + parseFloat(d.precio_unitario) * d.cantidad, 0);
-    await Venta.update({ total }, { where: { idventas: data.idventas } });
+    try {
+      let cantidadConsumoBase = null;
 
-    return await DetalleVenta.findByPk(detalle.iddetalleventas, {
-      include: [{ model: Servicio, as: "servicio" }],
-    });
+      if (
+        data.idproducto !== undefined &&
+        data.idproducto !== null &&
+        data.cantidadconsumo !== undefined &&
+        data.cantidadconsumo !== null &&
+        data.unidadconsumo
+      ) {
+        const producto = await Producto.findByPk(Number(data.idproducto), { transaction });
+
+        if (!producto) {
+          const error = new Error("Producto no encontrado");
+          error.statusCode = 404;
+          throw error;
+        }
+
+        cantidadConsumoBase = this.convertirConsumoABase(
+          producto,
+          data.cantidadconsumo,
+          data.unidadconsumo
+        );
+
+        const stockActual = Number(producto.stockbase || 0);
+
+        if (stockActual < cantidadConsumoBase) {
+          const error = new Error(`Stock insuficiente para ${producto.nombreproductos}`);
+          error.statusCode = 400;
+          throw error;
+        }
+
+        await producto.update(
+          {
+            stockbase: Number((stockActual - cantidadConsumoBase).toFixed(3)),
+          },
+          { transaction }
+        );
+      }
+
+      const detalle = await DetalleVenta.create(
+        {
+          ...data,
+          cantidadconsumobase: cantidadConsumoBase,
+        },
+        { transaction }
+      );
+
+      const detalles = await DetalleVenta.findAll({
+        where: { idventas: data.idventas },
+        transaction,
+      });
+
+      const total = detalles.reduce(
+        (sum, d) => sum + parseFloat(d.precio_unitario) * d.cantidad,
+        0
+      );
+
+      await Venta.update({ total }, { where: { idventas: data.idventas }, transaction });
+
+      await transaction.commit();
+
+      return await DetalleVenta.findByPk(detalle.iddetalleventas, {
+        include: [
+          { model: Servicio, as: "servicio" },
+          { model: Producto, as: "producto", required: false },
+        ],
+      });
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   }
 
   async deleteDetalle(iddetalleventas) {
@@ -160,7 +346,7 @@ class SalesService {
     return { message: "Detalle eliminado exitosamente" };
   }
 
-  // Pagos de venta (igual)
+  // Pagos de venta
   async findAllPagos() {
     return await PagoVenta.findAll({
       include: [

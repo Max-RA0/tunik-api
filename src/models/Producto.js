@@ -27,6 +27,19 @@ const Producto = sequelize.define('Producto', {
     type: DataTypes.INTEGER,
     allowNull: false,
     defaultValue: 0
+  },
+  tipomedida: {
+    type: DataTypes.ENUM('volumen', 'longitud', 'unidad'),
+    allowNull: true
+  },
+  unidadbase: {
+    type: DataTypes.STRING(10),
+    allowNull: true
+  },
+  stockbase: {
+    type: DataTypes.DECIMAL(12, 3),
+    allowNull: true,
+    defaultValue: 0
   }
 }, {
   tableName: 'productos',

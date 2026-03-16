@@ -55,6 +55,7 @@ router.post(
   '/pedidos',
   [
     requirePermission('pedidos.create'),
+    body('codcompras').optional().matches(/^COM-\d{6}$/).withMessage('El código de compra debe tener formato COM-000200'),
     body('idproveedor').isInt().withMessage('Proveedor es requerido'),
     body('fechaPedido').notEmpty().withMessage('Fecha del pedido es requerida'),
     validate,
@@ -62,7 +63,13 @@ router.post(
   inventoryController.createPedido
 );
 
-router.put('/pedidos/:idpedidos', requirePermission('pedidos.update'), inventoryController.updatePedido);
+router.put(
+  '/pedidos/:idpedidos',
+  [requirePermission('pedidos.update'),
+    body('codcompras').optional().matches(/^COM-\d{6}$/).withMessage('El código de compra debe tener formato COM-000200'),
+    validate,
+  ],inventoryController.updatePedido
+);
 router.delete('/pedidos/:idpedidos', requirePermission('pedidos.delete'), inventoryController.deletePedido);
 
 // ========== DETALLES DE PEDIDO ==========
@@ -77,6 +84,9 @@ router.post(
     body('idproveedor').isInt().withMessage('ID de proveedor es requerido'),
     body('idproducto').isInt().withMessage('ID de producto es requerido'),
     body('cantidad').isInt({ min: 1 }).withMessage('Cantidad debe ser mayor a 0'),
+    body ('preciounitario').isDecimal().withMessage('Precio unitario es requerido'),
+    body ('cantidadcontenido').optional().isDecimal().withMessage('Cantidad de contenido debe ser un número'),
+    body ('unidadcontenido').optional().isString().withMessage('Unidad de contenido debe ser una cadena'),
     validate,
   ],
   inventoryController.createDetallePedido

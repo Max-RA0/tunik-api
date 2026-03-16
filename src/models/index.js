@@ -116,6 +116,10 @@ Producto.hasMany(DetallePedidoProducto, { foreignKey: 'idproducto', as: 'detalle
 Producto.belongsTo(Proveedor, { foreignKey: 'idproveedor', as: 'proveedor' });
 Proveedor.hasMany(Producto, { foreignKey: 'idproveedor', as: 'productos' });
 
+// Producto - DetalleVenta
+Producto.hasMany(DetalleVenta, { foreignKey: 'idproducto', as: 'detallesVenta' });
+DetalleVenta.belongsTo(Producto, { foreignKey: 'idproducto', as: 'producto' });
+
 // EvaluacionServicio - User
 EvaluacionServicio.belongsTo(User, { foreignKey: 'numero_documento', as: 'usuario' });
 User.hasMany(EvaluacionServicio, { foreignKey: 'numero_documento', as: 'evaluaciones' });

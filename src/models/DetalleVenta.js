@@ -23,6 +23,26 @@ const DetalleVenta = sequelize.define('DetalleVenta', {
       key: 'idservicios'
     }
   },
+  idproducto: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    references: {
+      model: 'productos',
+      key: 'idproductos'
+    }
+  },
+  cantidadconsumo: {
+    type: DataTypes.DECIMAL(12, 3),
+    allowNull: true
+  },
+  unidadconsumo: {
+    type: DataTypes.STRING(10),
+    allowNull: true
+  },
+  cantidadconsumobase: {
+    type: DataTypes.DECIMAL(12, 3),
+    allowNull: true
+  },
   cantidad: {
     type: DataTypes.INTEGER,
     allowNull: false,

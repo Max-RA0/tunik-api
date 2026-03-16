@@ -7,6 +7,11 @@ const Pedido = sequelize.define('Pedido', {
     primaryKey: true,
     autoIncrement: true
   },
+  codcompras: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+    unique: true
+  },
   idproveedor: {
     type: DataTypes.INTEGER,
     allowNull: false,

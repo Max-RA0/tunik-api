@@ -32,6 +32,21 @@ const DetallePedidoProducto = sequelize.define('DetallePedidoProducto', {
     allowNull: false,
     field: 'cantidad'
   },
+  cantidadcontenido: {
+    type: DataTypes.DECIMAL(12, 3),
+    allowNull: true,
+    field: 'cantidadcontenido'
+  },
+  unidadcontenido: {
+    type: DataTypes.STRING(10),
+    allowNull: true,
+    field: 'unidadcontenido'
+  },
+  cantidadcontenidobase: {
+    type: DataTypes.DECIMAL(12, 3),
+    allowNull: true,
+    field: 'cantidadcontenidobase'
+  },
   preciounitario: {
     type: DataTypes.DECIMAL(10, 2),
     allowNull: false,

@@ -164,7 +164,7 @@ class AuthService {
     const user = await User.findOne({ where: { email } });
     
     if (!user) {
-      // Don't reveal if user exists
+    
       return { message: 'Si el email existe, recibirás instrucciones para restablecer tu contraseña' };
     }
 
