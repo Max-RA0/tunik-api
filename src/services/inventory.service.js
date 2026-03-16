@@ -515,7 +515,7 @@ class InventoryService {
       unidadContenido
     );
 
-    const entradaTotalBase = Number((cantidad * cantidadContenidoBase).toFixed(3));
+    const entradaTotalBase = Number((cantidad * cantidadContenidoBase));
     const stockActual = Number(producto.stockbase || 0);
     const nuevoStock = Number((stockActual + entradaTotalBase).toFixed(3));
 
